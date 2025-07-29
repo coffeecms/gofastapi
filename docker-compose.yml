@@ -1,0 +1,157 @@
+version: '3.8'
+
+services:
+  # GoFastAPI application
+  gofastapi:
+    build: 
+      context: .
+      target: production
+    ports:
+      - "8000:8000"
+      - "9090:9090"
+    environment:
+      - GOFASTAPI_DEBUG=false
+      - GOFASTAPI_WORKERS=4
+      - GOFASTAPI_METRICS_ENABLED=true
+      - GOFASTAPI_LOG_LEVEL=INFO
+    volumes:
+      - ./logs:/app/logs
+      - ./app:/app/app  # Mount application code
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - gofastapi-network
+
+  # Development version with hot-reload
+  gofastapi-dev:
+    build: 
+      context: .
+      target: development
+    ports:
+      - "8001:8000"
+      - "9091:9090"
+    environment:
+      - GOFASTAPI_DEBUG=true
+      - GOFASTAPI_HOT_RELOAD=true
+      - GOFASTAPI_METRICS_ENABLED=true
+      - GOFASTAPI_LOG_LEVEL=DEBUG
+    volumes:
+      - .:/app  # Mount entire project for development
+    profiles:
+      - development
+    networks:
+      - gofastapi-network
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=gofastapi
+      - POSTGRES_USER=gofastapi
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - gofastapi-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - gofastapi-network
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9092:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - gofastapi-network
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - gofastapi-network
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - gofastapi
+    networks:
+      - gofastapi-network
+
+  # Load testing with wrk
+  load-test:
+    image: williamyeh/wrk
+    command: |
+      wrk -t12 -c400 -d30s --latency http://gofastapi:8000/
+    depends_on:
+      - gofastapi
+    profiles:
+      - testing
+    networks:
+      - gofastapi-network
+
+  # Security scanning
+  security-scan:
+    image: owasp/zap2docker-stable
+    command: |
+      zap-baseline.py -t http://gofastapi:8000 -J zap-report.json
+    volumes:
+      - ./security:/zap/wrk
+    depends_on:
+      - gofastapi
+    profiles:
+      - security
+    networks:
+      - gofastapi-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  gofastapi-network:
+    driver: bridge
